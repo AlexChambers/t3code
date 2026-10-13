@@ -65,6 +65,96 @@ describe("subscription widget snapshots", () => {
     expect(snapshot.url).toBe(deepLink);
     expect(JSON.stringify(snapshot)).not.toContain("private@example.com");
   });
+  it.each([99, 100])(
+    "publishes effective quota and the usable reset with %i%% weekly used",
+    (usedPercent) => {
+      const weeklyReset = "2026-09-08T12:00:00.000Z";
+      const snapshot = buildSubscriptionUsageSnapshot(
+        presentations([
+          provider({
+            usageLimits: {
+              checkedAt,
+              windows: [
+                { ...window, usedPercent: 2 },
+                {
+                  ...window,
+                  id: "secondary",
+                  kind: "weekly",
+                  label: "Weekly",
+                  usedPercent,
+                  resetsAt: weeklyReset,
+                },
+              ],
+            },
+          }),
+        ]),
+        deepLink,
+      );
+      const session = snapshot.providers[0]?.windows.find((window) => window.kind === "session");
+      expect(session?.remaining).toBe(usedPercent === 100 ? 0 : 98);
+      expect(session?.reset).toBe(
+        `Next reset ${new Date(usedPercent === 100 ? weeklyReset : window.resetsAt).toLocaleString(
+          undefined,
+          {
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+          },
+        )}`,
+      );
+    },
+  );
+
+  it.each([0, 50])(
+    "selects the first usable session reset with %i%% session used and weekly headroom",
+    (usedPercent) => {
+      const usableReset = "2026-09-05T12:12:00.000Z";
+      const snapshot = buildSubscriptionUsageSnapshot(
+        presentations([
+          provider({
+            usageLimits: {
+              checkedAt,
+              windows: [
+                { ...window, usedPercent },
+                {
+                  ...window,
+                  id: "secondary",
+                  kind: "weekly",
+                  label: "Weekly",
+                  usedPercent: 50,
+                  resetsAt: "2026-09-08T12:00:00.000Z",
+                },
+              ],
+            },
+          }),
+          provider({
+            instanceId: ProviderInstanceId.make("other"),
+            auth: { status: "authenticated", email: "other@example.com" },
+            usageLimits: {
+              checkedAt,
+              windows: [{ ...window, usedPercent: 60, resetsAt: usableReset }],
+            },
+          }),
+        ]),
+        deepLink,
+      );
+      const session = snapshot.providers[0]?.windows.find((window) => window.kind === "session");
+      expect(session?.remaining).toBe(usedPercent === 0 ? 70 : 45);
+      expect(session?.reset).toBe(
+        `Next reset ${new Date(usedPercent === 0 ? usableReset : window.resetsAt).toLocaleString(
+          undefined,
+          {
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+          },
+        )}`,
+      );
+    },
+  );
+
   it("clears data after removing environments", () => {
     expect(buildSubscriptionUsageSnapshot(new Map(), deepLink).providers).toEqual([]);
   });

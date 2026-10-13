@@ -101,19 +101,24 @@ function subscriptionUsageProps(
           expiresAt: fresh ? expiresAt : 0,
           totalWindows: fresh ? pool.windows.length : 0,
           windows: fresh
-            ? selectedWindows.map((window) => ({
-                kind: window.kind,
-                label: window.label,
-                remaining: Math.round(window.remainingPercent),
-                reset: window.resets[0]
-                  ? `Next reset ${new Date(window.resets[0].at).toLocaleString(undefined, {
-                      month: "short",
-                      day: "numeric",
-                      hour: "numeric",
-                      minute: "2-digit",
-                    })}`
-                  : "Reset time unavailable",
-              }))
+            ? selectedWindows.map((window) => {
+                // Prefer the reset that frees usable quota; a held account's own reset frees nothing.
+                const nextRefill =
+                  window.resets.find((reset) => reset.restoresPercent > 0) ?? window.resets[0];
+                return {
+                  kind: window.kind,
+                  label: window.label,
+                  remaining: Math.round(window.remainingPercent),
+                  reset: nextRefill
+                    ? `Next reset ${new Date(nextRefill.at).toLocaleString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}`
+                    : "Reset time unavailable",
+                };
+              })
             : [],
         };
       }),

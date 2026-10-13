@@ -360,13 +360,19 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
 
 export interface LimitPoolMember {
   readonly account: LimitAccount;
+  /** Raw allowance reported by the provider. */
   readonly window: ServerProviderUsageWindow;
+  /** Raw remaining quota, or zero while a broader allowance is used up. */
+  readonly effectiveRemainingPercent: number;
+  /** A broader allowance that is used up, or null when this window is unheld. */
+  readonly holdingWindow: ServerProviderUsageWindow | null;
 }
 
 /**
- * One window id across every account that reports it: the pooled share left,
- * pace against the clock, and the resets in the order they will land, each
- * with the share of the pool it hands back.
+ * One allowance across accounts that report it, with equal shares of their
+ * effective remaining quota. Pace and countdowns use the holding window's
+ * clock when a broader allowance binds. Resets are ordered by that clock and
+ * restore only the quota usable once the account's windows have reset by then.
  */
 export interface LimitPoolWindow {
   readonly id: string;
@@ -374,17 +380,20 @@ export interface LimitPoolWindow {
   readonly label: string;
   readonly members: readonly LimitPoolMember[];
   /** Fixed account positions across rows; a null window leaves a gap. */
-  readonly columns: ReadonlyArray<{
-    readonly account: LimitAccount;
-    readonly window: ServerProviderUsageWindow | null;
-  }>;
+  readonly columns: ReadonlyArray<
+    | LimitPoolMember
+    | {
+        readonly account: LimitAccount;
+        readonly window: null;
+      }
+  >;
   readonly remainingPercent: number;
   readonly usedPercent: number;
   readonly pace: LimitPace | null;
   readonly resets: ReadonlyArray<{
     readonly member: LimitPoolMember;
     readonly at: number;
-    /** Points of the pool the reset restores: the member's used share over the member count. */
+    /** Usable points restored at this reset, divided by the member count; can be zero. */
     readonly restoresPercent: number;
   }>;
 }
@@ -480,6 +489,38 @@ function poolKey(driver: ServerProvider["driver"], window: ServerProviderUsageWi
   return driver === "codex" ? window.kind : `${window.kind}:${window.id}`;
 }
 
+/** Broader allowances that count the same usage on this account. */
+function bindingWindows(account: LimitAccount, window: ServerProviderUsageWindow) {
+  return account.limits.windows.filter((broader) => {
+    switch (account.driver) {
+      case "claudeAgent":
+        // Model-scoped weekly usage also counts toward Claude's all-models weekly.
+        // The model-scoped rule can be dropped independently of the session rule.
+        return (
+          (window.id === "five_hour" || window.id.startsWith("seven_day_")) &&
+          broader.id === "seven_day"
+        );
+      case "codex":
+        return window.kind === "session" && broader.kind === "weekly";
+      case "antigravity":
+        return window.id.endsWith("-5h") && broader.id === window.id.replace(/-5h$/, "-weekly");
+      default:
+        return false;
+    }
+  });
+}
+
+function quotaRemaining(window: ServerProviderUsageWindow): number {
+  return 100 - Math.max(0, Math.min(100, window.usedPercent));
+}
+
+function poolMember(account: LimitAccount, window: ServerProviderUsageWindow): LimitPoolMember {
+  const holdingWindow =
+    bindingWindows(account, window).find((broader) => broader.usedPercent >= 100) ?? null;
+  const effectiveRemainingPercent = holdingWindow ? 0 : quotaRemaining(window);
+  return { account, window, effectiveRemainingPercent, holdingWindow };
+}
+
 function poolWindows(accounts: readonly LimitAccount[], now: number): readonly LimitPoolWindow[] {
   const byKey = new Map<string, LimitPoolMember[]>();
   for (const account of accounts) {
@@ -490,8 +531,9 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
         ? `${window.kind}:${window.id}`
         : pooled;
       const list = byKey.get(key);
-      if (list) list.push({ account, window });
-      else byKey.set(key, [{ account, window }]);
+      const member = poolMember(account, window);
+      if (list) list.push(member);
+      else byKey.set(key, [member]);
     }
   }
   const pools = [...byKey].map(([key, members]): LimitPoolWindow => {
@@ -500,29 +542,40 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
     // Pooled Codex slots take the pool's own key, so the id stays the same
     // whichever account sorts first.
     const id = members[0]!.account.driver === "codex" ? key : first.id;
-    const usedPercent = members.reduce((sum, m) => sum + m.window.usedPercent, 0) / members.length;
+    const usedPercent =
+      members.reduce((sum, m) => sum + 100 - m.effectiveRemainingPercent, 0) / members.length;
     // Pace compares spend against the clock, so it is judged only over the
     // members that have a clock; a window with no reset would otherwise
     // count as spend with no time elapsed and skew the verdict.
     const timed = members.flatMap((m) => {
-      const share = elapsedShare(m.window, now);
-      return share === null ? [] : [{ used: m.window.usedPercent, elapsed: share }];
+      const share = elapsedShare(m.holdingWindow ?? m.window, now);
+      return share === null ? [] : [{ used: 100 - m.effectiveRemainingPercent, elapsed: share }];
     });
     const timedUsed = timed.reduce((sum, t) => sum + t.used, 0) / timed.length;
     const meanElapsed =
       timed.length > 0 ? timed.reduce((sum, t) => sum + t.elapsed, 0) / timed.length : null;
     const resets = members
       .flatMap((member) => {
-        const at = resetMillis(member.window);
-        return at === null
-          ? []
-          : [
-              {
-                member,
-                at,
-                restoresPercent: Math.round(member.window.usedPercent / members.length),
-              },
-            ];
+        const at = resetMillis(member.holdingWindow ?? member.window);
+        if (at === null) return [];
+        const remainingAfter = (window: ServerProviderUsageWindow) => {
+          const resetAt = resetMillis(window);
+          return resetAt !== null && resetAt <= at ? 100 : quotaRemaining(window);
+        };
+        const remainingAfterReset = bindingWindows(member.account, member.window).some(
+          (broader) => remainingAfter(broader) === 0,
+        )
+          ? 0
+          : remainingAfter(member.window);
+        return [
+          {
+            member,
+            at,
+            restoresPercent: Math.round(
+              (remainingAfterReset - member.effectiveRemainingPercent) / members.length,
+            ),
+          },
+        ];
       })
       .sort((left, right) => left.at - right.at);
     return {

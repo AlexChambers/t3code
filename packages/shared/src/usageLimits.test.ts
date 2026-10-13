@@ -5,6 +5,7 @@ import {
   type ServerProvider,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -842,6 +843,342 @@ describe("pools", () => {
   });
 });
 
+describe("pooled binding limits", () => {
+  const resetIn = (minutes: number) =>
+    DateTime.formatIso(DateTime.makeUnsafe(now + minutes * 60_000));
+  const weekly = {
+    ...window,
+    id: "seven_day",
+    kind: "weekly",
+    label: "Weekly",
+    windowDurationMins: 7 * 24 * 60,
+  } as const;
+  const account = (
+    key: string,
+    windows: LimitAccount["limits"]["windows"],
+    driver = "claudeAgent",
+  ): LimitAccount => ({
+    key,
+    driver: ProviderDriverKind.make(driver),
+    displayName: key,
+    email: undefined,
+    plan: undefined,
+    accentColor: undefined,
+    environments: [],
+    sourceLabel: "Hub",
+    redeem: null,
+    limits: { checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)), windows },
+  });
+
+  it("holds the spent Claude accounts and restores only usable quota at each countdown", () => {
+    const accounts = [
+      {
+        key: "A",
+        session: 98,
+        week: 0,
+        fable: 48,
+        sessionReset: resetIn(66),
+        weekReset: resetIn(1016),
+      },
+      {
+        key: "B",
+        session: 32,
+        week: 50,
+        fable: 78,
+        sessionReset: resetIn(166),
+        weekReset: resetIn((5 * 24 + 17) * 60),
+      },
+      {
+        key: "C",
+        session: 100,
+        week: 0,
+        fable: 98,
+        sessionReset: undefined,
+        weekReset: resetIn((4 * 24 + 21) * 60),
+      },
+    ].map(({ key, session, week, fable, sessionReset, weekReset }) =>
+      account(key, [
+        { ...window, usedPercent: 100 - session, resetsAt: sessionReset },
+        { ...weekly, usedPercent: 100 - week, resetsAt: weekReset },
+        {
+          ...weekly,
+          id: "seven_day_fable",
+          label: "Weekly · Fable",
+          usedPercent: 100 - fable,
+          resetsAt: weekReset,
+        },
+      ]),
+    );
+    const [pool] = collectLimitPools(accounts, now);
+    const session = pool!.windows.find((row) => row.id === "five_hour")!;
+    const week = pool!.windows.find((row) => row.id === "seven_day")!;
+    const fable = pool!.windows.find((row) => row.id === "seven_day_fable")!;
+    expect(session.remainingPercent).toBe(11);
+    expect(session.usedPercent).toBe(89);
+    expect(session.members.map((member) => member.effectiveRemainingPercent)).toEqual([0, 32, 0]);
+    expect(session.members[1]!.holdingWindow).toBeNull();
+    expect(fable.remainingPercent).toBe(26);
+    expect(fable.members.map((member) => member.effectiveRemainingPercent)).toEqual([0, 78, 0]);
+    expect(fable.members[1]!.holdingWindow).toBeNull();
+    expect(week.remainingPercent).toBe(17);
+    expect(week.members.every((member) => member.holdingWindow === null)).toBe(true);
+    expect(session.resets.find((reset) => reset.restoresPercent > 0)).toMatchObject({
+      member: { account: { key: "B" } },
+      at: Date.parse(resetIn(166)),
+      restoresPercent: 23,
+    });
+    expect(fable.resets.find((reset) => reset.restoresPercent > 0)).toMatchObject({
+      member: { account: { key: "A" } },
+      at: Date.parse(resetIn(1016)),
+      restoresPercent: 33,
+    });
+    const held = session.members.find((member) => member.account.key === "A")!;
+    expect(held.window.usedPercent).toBe(2);
+    expect(held.holdingWindow).toMatchObject({ id: "seven_day", resetsAt: resetIn(1016) });
+    expect(formatResetsIn(held.holdingWindow!, now)).toBe("resets in 16h 56m");
+    expect(session.resets.find((reset) => reset.member === held)).toMatchObject({
+      at: Date.parse(resetIn(1016)),
+      restoresPercent: 33,
+    });
+    expect(session.resets.some((reset) => reset.at === Date.parse(resetIn(66)))).toBe(false);
+    expect(
+      session.resets.map((reset) => [reset.member.account.key, reset.at, reset.restoresPercent]),
+    ).toEqual([
+      ["B", Date.parse(resetIn(166)), 23],
+      ["A", Date.parse(resetIn(1016)), 33],
+      ["C", Date.parse(resetIn((4 * 24 + 21) * 60)), 33],
+    ]);
+  });
+
+  it.each([1, 46])("leaves a fresh session unheld with %i%% weekly left", (week) => {
+    const [pool] = collectLimitPools(
+      [
+        account("A", [
+          { ...window, usedPercent: 0 },
+          { ...weekly, usedPercent: 100 - week, resetsAt: resetIn(24 * 60) },
+        ]),
+      ],
+      now,
+    );
+    expect(pool!.windows[0]).toMatchObject({
+      remainingPercent: 100,
+      members: [{ holdingWindow: null, effectiveRemainingPercent: 100 }],
+      resets: [{ at: Date.parse(window.resetsAt), restoresPercent: 0 }],
+    });
+  });
+
+  it("restores the whole session when its weekly still has headroom", () => {
+    const [pool] = collectLimitPools(
+      [
+        account("A", [
+          { ...window, usedPercent: 68 },
+          { ...weekly, usedPercent: 50, resetsAt: resetIn(24 * 60) },
+        ]),
+      ],
+      now,
+    );
+    const session = pool!.windows[0]!;
+    expect(session.remainingPercent).toBe(32);
+    expect(session.members[0]!.holdingWindow).toBeNull();
+    expect(session.resets[0]).toMatchObject({
+      at: Date.parse(window.resetsAt),
+      restoresPercent: 68,
+    });
+  });
+
+  it.each([99, 100, 101])(
+    "holds Codex sessions only when the weekly kind is spent (%i%% used)",
+    (usedPercent) => {
+      const [pool] = collectLimitPools(
+        [
+          account(
+            "A",
+            [
+              { ...window, id: "primary", usedPercent: 2 },
+              { ...weekly, id: "secondary", usedPercent, resetsAt: resetIn(24 * 60) },
+            ],
+            "codex",
+          ),
+        ],
+        now,
+      );
+      const spent = usedPercent >= 100;
+      expect(pool!.windows[0]).toMatchObject({
+        id: "session",
+        remainingPercent: spent ? 0 : 98,
+        members: [
+          {
+            holdingWindow: spent ? { id: "secondary" } : null,
+            effectiveRemainingPercent: spent ? 0 : 98,
+          },
+        ],
+        resets: [
+          {
+            at: Date.parse(spent ? resetIn(24 * 60) : window.resetsAt),
+            restoresPercent: spent ? 100 : 2,
+          },
+        ],
+      });
+    },
+  );
+
+  it("leaves Cursor allowances unheld even when a weekly window is spent", () => {
+    const [pool] = collectLimitPools(
+      [
+        account(
+          "A",
+          [
+            { ...window, usedPercent: 2 },
+            { ...weekly, usedPercent: 100 },
+          ],
+          "cursor",
+        ),
+      ],
+      now,
+    );
+    expect(pool!.windows[0]).toMatchObject({
+      remainingPercent: 98,
+      members: [{ holdingWindow: null }],
+      resets: [{ restoresPercent: 2 }],
+    });
+  });
+
+  it.each([99, 100])(
+    "holds only the matching Antigravity group when its weekly is spent (%i%% used)",
+    (usedPercent) => {
+      const [pool] = collectLimitPools(
+        [
+          account(
+            "A",
+            [
+              { ...window, id: "3p-5h", usedPercent: 2 },
+              { ...weekly, id: "3p-weekly", usedPercent },
+              { ...window, id: "gemini-5h", usedPercent: 10 },
+            ],
+            "antigravity",
+          ),
+        ],
+        now,
+      );
+      expect(pool!.windows.find((row) => row.id === "3p-5h")).toMatchObject({
+        remainingPercent: usedPercent === 100 ? 0 : 98,
+        members: [{ holdingWindow: usedPercent === 100 ? { id: "3p-weekly" } : null }],
+      });
+      expect(pool!.windows.find((row) => row.id === "gemini-5h")).toMatchObject({
+        remainingPercent: 90,
+        members: [{ holdingWindow: null }],
+      });
+    },
+  );
+
+  it("restores only the raw session headroom when its holding weekly resets first", () => {
+    const [pool] = collectLimitPools(
+      [
+        account("A", [
+          { ...window, usedPercent: 20, resetsAt: resetIn(180) },
+          { ...weekly, usedPercent: 100, resetsAt: resetIn(60) },
+        ]),
+      ],
+      now,
+    );
+    expect(pool!.windows[0]!.resets[0]).toMatchObject({
+      at: Date.parse(resetIn(60)),
+      restoresPercent: 80,
+    });
+  });
+
+  it("skips a reset that frees no usable quota when selecting the next refill", () => {
+    const [pool] = collectLimitPools(
+      [
+        account("A", [{ ...window, usedPercent: 0, resetsAt: resetIn(60) }]),
+        account("B", [{ ...window, usedPercent: 60, resetsAt: resetIn(120) }]),
+      ],
+      now,
+    );
+    const session = pool!.windows[0]!;
+    expect(session.resets[0]!.restoresPercent).toBe(0);
+    expect(session.resets.find((reset) => reset.restoresPercent > 0)).toMatchObject({
+      member: { account: { key: "B" } },
+      restoresPercent: 30,
+    });
+  });
+
+  it("holds a spent session by its spent weekly until the weekly reset", () => {
+    const [pool] = collectLimitPools(
+      [
+        account("A", [
+          { ...window, usedPercent: 100, resetsAt: resetIn(60) },
+          { ...weekly, usedPercent: 100, resetsAt: resetIn(24 * 60) },
+        ]),
+      ],
+      now,
+    );
+    const session = pool!.windows[0]!;
+    expect(session.members[0]!.holdingWindow).toMatchObject({ id: weekly.id });
+    expect(session.resets[0]).toMatchObject({
+      at: Date.parse(resetIn(24 * 60)),
+      restoresPercent: 100,
+    });
+  });
+
+  it("uses the holding clock and effective usage for pace", () => {
+    const [pool] = collectLimitPools(
+      [
+        account("A", [
+          { ...window, usedPercent: 0 },
+          { ...weekly, usedPercent: 100, resetsAt: resetIn(6 * 24 * 60) },
+        ]),
+      ],
+      now,
+    );
+    expect(pool!.windows[0]).toMatchObject({
+      remainingPercent: 0,
+      usedPercent: 100,
+      pace: "ahead",
+      members: [{ effectiveRemainingPercent: 0, holdingWindow: { id: weekly.id } }],
+    });
+  });
+
+  it("preserves raw fractional session quota while the weekly has headroom", () => {
+    const [pool] = collectLimitPools(
+      [
+        account("A", [
+          { ...window, usedPercent: 61.4 },
+          { ...weekly, usedPercent: 99.9, resetsAt: resetIn(6 * 24 * 60) },
+        ]),
+      ],
+      now,
+    );
+    expect(pool!.windows[0]).toMatchObject({
+      remainingPercent: 39,
+      usedPercent: 61,
+      members: [{ effectiveRemainingPercent: 38.6, holdingWindow: null }],
+    });
+  });
+
+  it("restores nothing while another binding weekly is still spent", () => {
+    const [pool] = collectLimitPools(
+      [
+        account(
+          "A",
+          [
+            { ...window, usedPercent: 2, resetsAt: resetIn(60) },
+            { ...weekly, id: "secondary", usedPercent: 100, resetsAt: resetIn(120) },
+            { ...weekly, id: "other", usedPercent: 100, resetsAt: resetIn(180) },
+          ],
+          "codex",
+        ),
+      ],
+      now,
+    );
+    expect(pool!.windows[0]).toMatchObject({
+      remainingPercent: 0,
+      resets: [{ at: Date.parse(resetIn(120)), restoresPercent: 0 }],
+    });
+    expect(pool!.windows[0]!.resets.find((reset) => reset.restoresPercent > 0)).toBeUndefined();
+  });
+});
+
 describe("pooled account columns", () => {
   const weekly = {
     ...window,
@@ -1464,6 +1801,6 @@ describe("Antigravity limit presentation", () => {
       "3p-5h",
       "3p-weekly",
     ]);
-    expect(windows.map((window) => window.remainingPercent)).toEqual([80, 90, 10, 0]);
+    expect(windows.map((window) => window.remainingPercent)).toEqual([80, 90, 0, 0]);
   });
 });
