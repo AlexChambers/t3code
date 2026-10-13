@@ -40,15 +40,15 @@ function accountName(account: LimitAccount) {
   return `${local[0] ?? ""}${domain[0] ?? ""}`.toUpperCase() || "Account";
 }
 
-/** The spent share comes back at reset. SVG keeps the hatching static on both platforms. */
+/** Hatching marks what the countdown restores. SVG keeps it static on both platforms. */
 function AccountSegment({
   remaining,
+  restored,
   color,
-  pending,
 }: {
   readonly remaining: number;
+  readonly restored: number;
   readonly color: string;
-  readonly pending: boolean;
 }) {
   const patternId = useId().replace(/:/g, "");
   return (
@@ -58,10 +58,10 @@ function AccountSegment({
           <Path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke={color} strokeWidth={1} opacity={0.22} />
         </Pattern>
       </Defs>
-      {pending ? (
+      {restored > 0 ? (
         <Rect
           x={`${remaining}%`}
-          width={`${100 - remaining}%`}
+          width={`${restored}%`}
           height="100%"
           fill={`url(#${patternId})`}
         />
@@ -143,7 +143,11 @@ function PoolWindowCard({
               onPress={() => openAccount(account)}
               className="h-7 min-w-0 flex-1 overflow-hidden rounded-md bg-subtle"
             >
-              <AccountSegment remaining={remaining} color={color} pending={Boolean(resetsIn)} />
+              <AccountSegment
+                remaining={remaining}
+                restored={Math.round(member.remainingAfterResetPercent) - remaining}
+                color={color}
+              />
               <View pointerEvents="none" className="absolute inset-0 items-center justify-center">
                 <Text className="text-xs font-t3-medium tabular-nums text-foreground">
                   {index + 1}
@@ -185,15 +189,15 @@ function PoolWindowCard({
                 {remaining}%
               </Text>
               <View className="flex-row items-center gap-1">
+                {holdingWindow ? (
+                  <SymbolView
+                    name={{ ios: "lock", android: "lock" }}
+                    size={12}
+                    tintColorClassName="accent-foreground-muted"
+                  />
+                ) : null}
                 {resetsIn ? (
                   <>
-                    {holdingWindow ? (
-                      <SymbolView
-                        name={{ ios: "lock", android: "lock" }}
-                        size={12}
-                        tintColorClassName="accent-foreground-muted"
-                      />
-                    ) : null}
                     <SymbolView
                       name="arrow.clockwise"
                       size={12}

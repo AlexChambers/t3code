@@ -366,6 +366,8 @@ export interface LimitPoolMember {
   readonly effectiveRemainingPercent: number;
   /** The used-up broader allowance whose reset frees this window, or null when none holds it. */
   readonly holdingWindow: ServerProviderUsageWindow | null;
+  /** Quota usable once the countdown ends; equals the effective quota when no reset is known. */
+  readonly remainingAfterResetPercent: number;
 }
 
 /**
@@ -521,23 +523,25 @@ function quotaRemaining(window: ServerProviderUsageWindow): number {
  */
 function poolMember(account: LimitAccount, window: ServerProviderUsageWindow): LimitPoolMember {
   const lastReset = (w: ServerProviderUsageWindow) => resetMillis(w) ?? Number.POSITIVE_INFINITY;
-  const spent = bindingWindows(account, window).filter((broader) => broader.usedPercent >= 100);
-  if (spent.length === 0) {
-    return {
-      account,
-      window,
-      effectiveRemainingPercent: quotaRemaining(window),
-      holdingWindow: null,
-    };
-  }
-  const latest = spent.reduce((a, b) => (lastReset(b) > lastReset(a) ? b : a));
-  const selfLater = window.usedPercent >= 100 && lastReset(window) > lastReset(latest);
-  return {
-    account,
-    window,
-    effectiveRemainingPercent: 0,
-    holdingWindow: selfLater ? null : latest,
-  };
+  const binding = bindingWindows(account, window);
+  const spent = binding.filter((broader) => broader.usedPercent >= 100);
+  const latest = spent.reduce<ServerProviderUsageWindow | null>(
+    (a, b) => (a && lastReset(a) >= lastReset(b) ? a : b),
+    null,
+  );
+  const holdingWindow =
+    latest && !(window.usedPercent >= 100 && lastReset(window) > lastReset(latest)) ? latest : null;
+  const effectiveRemainingPercent = latest ? 0 : quotaRemaining(window);
+  const at = resetMillis(holdingWindow ?? window);
+  const remainingAt = (w: ServerProviderUsageWindow) =>
+    at !== null && lastReset(w) <= at ? 100 : quotaRemaining(w);
+  const remainingAfterResetPercent =
+    at === null
+      ? effectiveRemainingPercent
+      : binding.some((broader) => remainingAt(broader) === 0)
+        ? 0
+        : remainingAt(window);
+  return { account, window, effectiveRemainingPercent, holdingWindow, remainingAfterResetPercent };
 }
 
 function poolWindows(accounts: readonly LimitAccount[], now: number): readonly LimitPoolWindow[] {
@@ -577,21 +581,13 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
       .flatMap((member) => {
         const at = resetMillis(member.holdingWindow ?? member.window);
         if (at === null) return [];
-        const remainingAfter = (window: ServerProviderUsageWindow) => {
-          const resetAt = resetMillis(window);
-          return resetAt !== null && resetAt <= at ? 100 : quotaRemaining(window);
-        };
-        const remainingAfterReset = bindingWindows(member.account, member.window).some(
-          (broader) => remainingAfter(broader) === 0,
-        )
-          ? 0
-          : remainingAfter(member.window);
         return [
           {
             member,
             at,
             restoresPercent: Math.round(
-              (remainingAfterReset - member.effectiveRemainingPercent) / members.length,
+              (member.remainingAfterResetPercent - member.effectiveRemainingPercent) /
+                members.length,
             ),
           },
         ];

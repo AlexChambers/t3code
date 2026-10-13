@@ -250,6 +250,7 @@ function PoolSegment({
   const { account, holdingWindow } = member;
   const [open, setOpen] = useState(false);
   const remaining = Math.round(member.effectiveRemainingPercent);
+  const restored = Math.round(member.remainingAfterResetPercent) - remaining;
   const resetsIn = formatResetsIn(member.holdingWindow ?? member.window, now);
   const credits = account.limits.resetCredits?.availableCount ?? 0;
   return (
@@ -271,13 +272,14 @@ function PoolSegment({
           className="absolute inset-y-0 left-0 rounded-md opacity-35"
           style={{ width: `${remaining}%`, backgroundColor: color }}
         />
-        {/* The spent share is hatched, not blank: it is what the countdown restores. */}
-        {remaining < 100 && reset ? (
+        {/* Hatching marks what the countdown restores; the rest of the spent share stays blank. */}
+        {restored > 0 ? (
           <div
             aria-hidden
-            className="absolute inset-y-0 right-0 opacity-20"
+            className="absolute inset-y-0 opacity-20"
             style={{
-              width: `${100 - remaining}%`,
+              left: `${remaining}%`,
+              width: `${restored}%`,
               backgroundImage: `repeating-linear-gradient(135deg, ${color} 0 1px, transparent 1px 5px)`,
             }}
           />
@@ -298,7 +300,7 @@ function PoolSegment({
           <span className="shrink-0 font-semibold text-foreground tabular-nums">{remaining}%</span>
           {/* Countdown and badge get their own plate: fill and hatching run under them otherwise. */}
           <span className="ms-auto flex shrink-0 items-center gap-1.5 rounded-sm bg-background/85 px-1.5 py-0.5 text-2xs text-foreground tabular-nums">
-            {holdingWindow && resetsIn ? <LockIcon className="size-3" aria-hidden /> : null}
+            {holdingWindow ? <LockIcon className="size-3" aria-hidden /> : null}
             {resetsIn?.replace("resets in ", "↻ ") ?? ""}
             {credits ? (
               <>
@@ -379,7 +381,7 @@ function LegendRow({
       <AccountName account={account} className="min-w-0 truncate font-medium text-foreground" />
       <span className="shrink-0 font-semibold text-foreground tabular-nums">{remaining}%</span>
       <span className="ms-auto flex shrink-0 items-center gap-1.5 text-2xs text-muted-foreground tabular-nums">
-        {holdingWindow && resetsIn ? <LockIcon className="size-3" aria-hidden /> : null}
+        {holdingWindow ? <LockIcon className="size-3" aria-hidden /> : null}
         {resetsIn?.replace("resets in ", "↻ ") ?? ""}
         {credits ? (
           <>

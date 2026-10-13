@@ -1081,6 +1081,10 @@ describe("pooled binding limits", () => {
       ],
       now,
     );
+    expect(pool!.windows[0]!.members[0]).toMatchObject({
+      effectiveRemainingPercent: 0,
+      remainingAfterResetPercent: 80,
+    });
     expect(pool!.windows[0]!.resets[0]).toMatchObject({
       at: Date.parse(resetIn(60)),
       restoresPercent: 80,
