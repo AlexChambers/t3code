@@ -1156,7 +1156,22 @@ describe("pooled binding limits", () => {
     });
   });
 
-  it("restores nothing while another binding weekly is still spent", () => {
+  it("counts down to its own reset when a spent session outlasts its spent weekly", () => {
+    const [pool] = collectLimitPools(
+      [
+        account("A", [
+          { ...window, usedPercent: 100, resetsAt: resetIn(240) },
+          { ...weekly, usedPercent: 100, resetsAt: resetIn(60) },
+        ]),
+      ],
+      now,
+    );
+    const session = pool!.windows[0]!;
+    expect(session.members[0]).toMatchObject({ effectiveRemainingPercent: 0, holdingWindow: null });
+    expect(session.resets).toMatchObject([{ at: Date.parse(resetIn(240)), restoresPercent: 100 }]);
+  });
+
+  it("counts down to the last of several spent binding weeklies", () => {
     const [pool] = collectLimitPools(
       [
         account(
@@ -1173,9 +1188,9 @@ describe("pooled binding limits", () => {
     );
     expect(pool!.windows[0]).toMatchObject({
       remainingPercent: 0,
-      resets: [{ at: Date.parse(resetIn(120)), restoresPercent: 0 }],
+      members: [{ holdingWindow: { id: "other" } }],
+      resets: [{ at: Date.parse(resetIn(180)), restoresPercent: 100 }],
     });
-    expect(pool!.windows[0]!.resets.find((reset) => reset.restoresPercent > 0)).toBeUndefined();
   });
 });
 

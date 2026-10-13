@@ -364,7 +364,7 @@ export interface LimitPoolMember {
   readonly window: ServerProviderUsageWindow;
   /** Raw remaining quota, or zero while a broader allowance is used up. */
   readonly effectiveRemainingPercent: number;
-  /** A broader allowance that is used up, or null when this window is unheld. */
+  /** The used-up broader allowance whose reset frees this window, or null when none holds it. */
   readonly holdingWindow: ServerProviderUsageWindow | null;
 }
 
@@ -514,11 +514,30 @@ function quotaRemaining(window: ServerProviderUsageWindow): number {
   return 100 - Math.max(0, Math.min(100, window.usedPercent));
 }
 
+/**
+ * The account spends again only once every used-up window has reset, so the
+ * last of those resets is its countdown. A broader window holds it when it
+ * is that last reset; a session that is spent past it holds itself.
+ */
 function poolMember(account: LimitAccount, window: ServerProviderUsageWindow): LimitPoolMember {
-  const holdingWindow =
-    bindingWindows(account, window).find((broader) => broader.usedPercent >= 100) ?? null;
-  const effectiveRemainingPercent = holdingWindow ? 0 : quotaRemaining(window);
-  return { account, window, effectiveRemainingPercent, holdingWindow };
+  const lastReset = (w: ServerProviderUsageWindow) => resetMillis(w) ?? Number.POSITIVE_INFINITY;
+  const spent = bindingWindows(account, window).filter((broader) => broader.usedPercent >= 100);
+  if (spent.length === 0) {
+    return {
+      account,
+      window,
+      effectiveRemainingPercent: quotaRemaining(window),
+      holdingWindow: null,
+    };
+  }
+  const latest = spent.reduce((a, b) => (lastReset(b) > lastReset(a) ? b : a));
+  const selfLater = window.usedPercent >= 100 && lastReset(window) > lastReset(latest);
+  return {
+    account,
+    window,
+    effectiveRemainingPercent: 0,
+    holdingWindow: selfLater ? null : latest,
+  };
 }
 
 function poolWindows(accounts: readonly LimitAccount[], now: number): readonly LimitPoolWindow[] {
