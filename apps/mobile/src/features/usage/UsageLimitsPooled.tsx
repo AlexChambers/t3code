@@ -9,7 +9,6 @@ import {
   cursorUsageWindowDetails,
   displayLimitWindows,
   formatResetsIn,
-  remainingPercent,
   type LimitAccount,
   type LimitPoolWindow,
 } from "@t3tools/shared/usageLimits";
@@ -40,15 +39,15 @@ function accountName(account: LimitAccount) {
   return `${local[0] ?? ""}${domain[0] ?? ""}`.toUpperCase() || "Account";
 }
 
-/** The spent share comes back at reset. SVG keeps the hatching static on both platforms. */
+/** Hatching marks what the countdown restores. SVG keeps it static on both platforms. */
 function AccountSegment({
   remaining,
+  restored,
   color,
-  pending,
 }: {
   readonly remaining: number;
+  readonly restored: number;
   readonly color: string;
-  readonly pending: boolean;
 }) {
   const patternId = useId().replace(/:/g, "");
   return (
@@ -58,10 +57,10 @@ function AccountSegment({
           <Path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke={color} strokeWidth={1} opacity={0.22} />
         </Pattern>
       </Defs>
-      {pending ? (
+      {restored > 0 ? (
         <Rect
           x={`${remaining}%`}
-          width={`${100 - remaining}%`}
+          width={`${restored}%`}
           height="100%"
           fill={`url(#${patternId})`}
         />
@@ -122,27 +121,31 @@ function PoolWindowCard({
       {nextRefill ? (
         <Text className="text-xs tabular-nums text-foreground-muted">
           ↻ +{nextRefill.restoresPercent}%{" "}
-          {formatResetsIn(nextRefill.member.window, now)
+          {formatResetsIn(nextRefill.member.holdingWindow ?? nextRefill.member.window, now)
             ?.replace("resets in ", "in ")
             .replace("resets now", "now")}
         </Text>
       ) : null}
       <View className="flex-row gap-1">
-        {pool.columns.map(({ account, window }, index) => {
+        {pool.columns.map((member, index) => {
+          const { account, window } = member;
           if (!window) return <View key={account.key} className="h-7 min-w-0 flex-1" />;
+          const remaining = Math.round(member.effectiveRemainingPercent);
+          const { holdingWindow } = member;
+          const resetsIn = formatResetsIn(holdingWindow ?? window, now);
           return (
             <Pressable
               key={account.key}
               accessibilityRole="button"
-              accessibilityLabel={`Segment ${index + 1}, ${accountName(account)}, ${remainingPercent(window)}% left`}
+              accessibilityLabel={`Segment ${index + 1}, ${accountName(account)}, ${remaining}% left${holdingWindow ? `, ${holdingWindow.label.toLowerCase()} limit used up` : ""}${resetsIn ? `, ${resetsIn}` : ""}`}
               accessibilityHint="Show account details"
               onPress={() => openAccount(account)}
               className="h-7 min-w-0 flex-1 overflow-hidden rounded-md bg-subtle"
             >
               <AccountSegment
-                remaining={remainingPercent(window)}
+                remaining={remaining}
+                restored={Math.round(member.remainingAfterResetPercent) - remaining}
                 color={color}
-                pending={Boolean(window.resetsAt)}
               />
               <View pointerEvents="none" className="absolute inset-0 items-center justify-center">
                 <Text className="text-xs font-t3-medium tabular-nums text-foreground">
@@ -154,15 +157,18 @@ function PoolWindowCard({
         })}
       </View>
       <View>
-        {pool.columns.map(({ account, window }, index) => {
+        {pool.columns.map((member, index) => {
+          const { account, window } = member;
           if (!window) return null;
           const credits = account.limits.resetCredits?.availableCount ?? 0;
-          const resetsIn = formatResetsIn(window, now);
+          const remaining = Math.round(member.effectiveRemainingPercent);
+          const { holdingWindow } = member;
+          const resetsIn = formatResetsIn(holdingWindow ?? window, now);
           return (
             <Pressable
               key={account.key}
               accessibilityRole="button"
-              accessibilityLabel={`Segment ${index + 1}, ${accountName(account)}, ${remainingPercent(window)}% left${resetsIn ? `, ${resetsIn}` : ""}${credits ? `, ${credits} reset credits banked` : ""}`}
+              accessibilityLabel={`Segment ${index + 1}, ${accountName(account)}, ${remaining}% left${holdingWindow ? `, ${holdingWindow.label.toLowerCase()} limit used up` : ""}${resetsIn ? `, ${resetsIn}` : ""}${credits ? `, ${credits} reset credits banked` : ""}`}
               accessibilityHint="Show account details"
               onPress={() => openAccount(account)}
               className="min-h-[44px] flex-row items-center gap-2 active:opacity-60"
@@ -179,9 +185,16 @@ function PoolWindowCard({
                 {accountName(account)}
               </Text>
               <Text className="text-sm font-t3-medium tabular-nums text-foreground">
-                {remainingPercent(window)}%
+                {remaining}%
               </Text>
               <View className="flex-row items-center gap-1">
+                {holdingWindow ? (
+                  <SymbolView
+                    name={{ ios: "lock", android: "lock" }}
+                    size={12}
+                    tintColorClassName="accent-foreground-muted"
+                  />
+                ) : null}
                 {resetsIn ? (
                   <>
                     <SymbolView
@@ -360,7 +373,9 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
   const pool = collectLimitPools(accounts, now)
     .find((candidate) => candidate.driver === account?.driver)
     ?.windows.find((candidate) => candidate.id === windowId && candidate.kind === windowKind);
-  const window = pool?.members.find((member) => member.account.key === accountKey)?.window;
+  const member = pool?.members.find((member) => member.account.key === accountKey);
+  // A held account frees up when its holding window resets, not its own.
+  const resetsAt = member && (member.holdingWindow ?? member.window).resetsAt;
   const reset = pool?.resets.find((candidate) => candidate.member.account.key === accountKey);
   const [revealed, setRevealed] = useState(false);
   return (
@@ -370,7 +385,7 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
         contentContainerClassName="gap-5 p-5"
         contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
       >
-        {!account || !window ? (
+        {!account || !member ? (
           <Text className="text-base text-foreground-muted">
             This account is no longer reporting limits on the selected environments.
           </Text>
@@ -402,14 +417,19 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
               ) : null}
             </View>
             <View className="gap-3 rounded-[24px] border-continuous bg-grouped-card p-4">
-              <Text className="text-sm font-t3-medium text-foreground">{window.label}</Text>
+              <Text className="text-sm font-t3-medium text-foreground">{member.window.label}</Text>
               <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
-                {remainingPercent(window)}% left
+                {Math.round(member.effectiveRemainingPercent)}% left
               </Text>
-              {window.resetsAt ? (
+              {member.holdingWindow ? (
+                <Text className="text-sm text-foreground-muted">
+                  Limited by {member.holdingWindow.label} limit, used up
+                </Text>
+              ) : null}
+              {resetsAt ? (
                 <Text selectable className="text-sm text-foreground-muted">
                   Resets{" "}
-                  {new Date(window.resetsAt).toLocaleString(undefined, {
+                  {new Date(resetsAt).toLocaleString(undefined, {
                     dateStyle: "medium",
                     timeStyle: "short",
                   })}

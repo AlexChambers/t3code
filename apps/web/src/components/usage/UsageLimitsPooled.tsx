@@ -11,9 +11,8 @@ import {
   type LimitPool,
   type LimitPoolMember,
   type LimitPoolWindow,
-  remainingPercent,
 } from "@t3tools/shared/usageLimits";
-import { AlertTriangleIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
+import { AlertTriangleIcon, ExternalLinkIcon, LockIcon, TicketIcon } from "lucide-react";
 import { Fragment, type ReactNode, useState } from "react";
 
 import { ensureLocalApi } from "../../localApi";
@@ -138,24 +137,24 @@ function Row({ label, children }: { readonly label: string; readonly children: R
  * reset-credit action. Opens on hover for a glance, on click to act.
  */
 function SegmentPopover({
-  account,
-  window,
+  member,
   reset,
   now,
   redeem,
   onRedeem,
 }: {
-  readonly account: LimitAccount;
-  readonly window: LimitPoolMember["window"];
+  readonly member: LimitPoolMember;
   readonly reset: LimitPoolWindow["resets"][number] | undefined;
   readonly now: number;
   /** Redeem state owned by the segment, since the confirm lives outside this popover. */
   readonly redeem: ReturnType<typeof useResetCredit> | null;
   readonly onRedeem: () => void;
 }) {
+  const { account, window, holdingWindow } = member;
+  const countdownWindow = holdingWindow ?? window;
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
-  const remaining = remainingPercent(window);
-  const resetsIn = formatResetsIn(window, now);
+  const remaining = Math.round(member.effectiveRemainingPercent);
+  const resetsIn = formatResetsIn(countdownWindow, now);
   const where =
     account.environments.length > 0
       ? account.environments.map((environment) => environment.label).join(", ")
@@ -189,13 +188,14 @@ function SegmentPopover({
       </div>
       <div className="flex flex-col gap-1 border-t border-border/60 pt-2.5">
         <Row label="Left">{remaining}%</Row>
-        {window.resetsAt ? (
+        {holdingWindow ? <Row label="Limited by">{holdingWindow.label} limit, used up</Row> : null}
+        {countdownWindow.resetsAt ? (
           <Row label="Resets">
-            {formatUpcomingTimestamp(window.resetsAt, timestampFormat, now)}
+            {formatUpcomingTimestamp(countdownWindow.resetsAt, timestampFormat, now)}
             {resetsIn ? ` · ${resetsIn.replace("resets in ", "in ")}` : ""}
           </Row>
         ) : null}
-        {reset && reset.restoresPercent > 0 ? (
+        {reset && (holdingWindow || reset.restoresPercent > 0) ? (
           <Row label="Restores">+{reset.restoresPercent}% of pool</Row>
         ) : null}
       </div>
@@ -225,16 +225,14 @@ function SegmentPopover({
  * stack under popovers, and the popover closes as the confirm opens.
  */
 function PoolSegment({
-  account,
-  window,
+  member,
   reset,
   color,
   now,
   index,
   showAccountName,
 }: {
-  readonly account: LimitAccount;
-  readonly window: LimitPoolMember["window"];
+  readonly member: LimitPoolMember;
   readonly reset: LimitPoolWindow["resets"][number] | undefined;
   readonly color: string;
   readonly now: number;
@@ -242,9 +240,11 @@ function PoolSegment({
   readonly index: number;
   readonly showAccountName: boolean;
 }) {
+  const { account, holdingWindow } = member;
   const [open, setOpen] = useState(false);
-  const remaining = remainingPercent(window);
-  const resetsIn = formatResetsIn(window, now);
+  const remaining = Math.round(member.effectiveRemainingPercent);
+  const restored = Math.round(member.remainingAfterResetPercent) - remaining;
+  const resetsIn = formatResetsIn(member.holdingWindow ?? member.window, now);
   const credits = account.limits.resetCredits?.availableCount ?? 0;
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -254,7 +254,7 @@ function PoolSegment({
           <button
             type="button"
             style={{ gridColumn: index, gridRow: 1 }}
-            aria-label={`${account.displayName ?? (account.email ? accountInitials(account.email) : account.driver)}: ${remaining}% left${resetsIn ? `, ${resetsIn}` : ""}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
+            aria-label={`${account.displayName ?? (account.email ? accountInitials(account.email) : account.driver)}: ${remaining}% left${holdingWindow ? `, ${holdingWindow.label.toLowerCase()} limit used up` : ""}${resetsIn ? `, ${resetsIn}` : ""}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
             className="relative h-5 min-w-0 cursor-pointer overflow-hidden rounded-md bg-muted text-start outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background data-[popup-open]:ring-1 data-[popup-open]:ring-inset data-[popup-open]:ring-border @2xl/pool:h-8"
           />
         }
@@ -265,13 +265,14 @@ function PoolSegment({
           className="absolute inset-y-0 left-0 rounded-md opacity-35"
           style={{ width: `${remaining}%`, backgroundColor: color }}
         />
-        {/* The spent share is hatched, not blank: it is what the countdown restores. */}
-        {remaining < 100 && reset ? (
+        {/* Hatching marks what the countdown restores; the rest of the spent share stays blank. */}
+        {restored > 0 ? (
           <div
             aria-hidden
-            className="absolute inset-y-0 right-0 opacity-20"
+            className="absolute inset-y-0 opacity-20"
             style={{
-              width: `${100 - remaining}%`,
+              left: `${remaining}%`,
+              width: `${restored}%`,
               backgroundImage: `repeating-linear-gradient(135deg, ${color} 0 1px, transparent 1px 5px)`,
             }}
           />
@@ -292,6 +293,7 @@ function PoolSegment({
           <span className="shrink-0 font-semibold text-foreground tabular-nums">{remaining}%</span>
           {/* Countdown and badge get their own plate: fill and hatching run under them otherwise. */}
           <span className="ms-auto flex shrink-0 items-center gap-1.5 rounded-sm bg-background/85 px-1.5 py-0.5 text-2xs text-foreground tabular-nums">
+            {holdingWindow ? <LockIcon className="size-3" aria-hidden /> : null}
             {resetsIn?.replace("resets in ", "↻ ") ?? ""}
             {credits ? (
               <>
@@ -309,11 +311,10 @@ function PoolSegment({
           </span>
         </div>
       </PopoverTrigger>
-      <LegendRow account={account} window={window} color={color} now={now} index={index} />
+      <LegendRow member={member} color={color} now={now} index={index} />
       {account.redeem ? (
         <RedeemableSegmentPopup
-          account={account}
-          window={window}
+          member={member}
           reset={reset}
           now={now}
           redeemAt={account.redeem}
@@ -322,8 +323,7 @@ function PoolSegment({
       ) : (
         <PopoverPopup side="top" sideOffset={6}>
           <SegmentPopover
-            account={account}
-            window={window}
+            member={member}
             reset={reset}
             now={now}
             redeem={null}
@@ -341,24 +341,24 @@ function PoolSegment({
  * as its segment, so the two are one control with two handles.
  */
 function LegendRow({
-  account,
-  window,
+  member,
   color,
   now,
   index,
 }: {
-  readonly account: LimitAccount;
-  readonly window: LimitPoolMember["window"];
+  readonly member: LimitPoolMember;
   readonly color: string;
   readonly now: number;
   readonly index: number;
 }) {
-  const remaining = remainingPercent(window);
-  const resetsIn = formatResetsIn(window, now);
+  const { account, holdingWindow } = member;
+  const remaining = Math.round(member.effectiveRemainingPercent);
+  const resetsIn = formatResetsIn(member.holdingWindow ?? member.window, now);
   const credits = account.limits.resetCredits?.availableCount ?? 0;
   return (
     <PopoverTrigger
       style={{ gridColumn: "1 / -1", gridRow: index + 1 }}
+      aria-label={`${account.displayName ?? (account.email ? accountInitials(account.email) : account.driver)}: ${remaining}% left${holdingWindow ? `, ${holdingWindow.label.toLowerCase()} limit used up` : ""}${resetsIn ? `, ${resetsIn}` : ""}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
       render={<Button variant="ghost" size="compact" />}
       className="min-w-0 @2xl/pool:hidden"
     >
@@ -374,6 +374,7 @@ function LegendRow({
       <AccountName account={account} className="min-w-0 truncate font-medium text-foreground" />
       <span className="shrink-0 font-semibold text-foreground tabular-nums">{remaining}%</span>
       <span className="ms-auto flex shrink-0 items-center gap-1.5 text-2xs text-muted-foreground tabular-nums">
+        {holdingWindow ? <LockIcon className="size-3" aria-hidden /> : null}
         {resetsIn?.replace("resets in ", "↻ ") ?? ""}
         {credits ? (
           <>
@@ -397,27 +398,25 @@ function LegendRow({
 
 /** Split out so the redeem hook only runs for accounts that can redeem. */
 function RedeemableSegmentPopup({
-  account,
-  window,
+  member,
   reset,
   now,
   redeemAt,
   closePopover,
 }: {
-  readonly account: LimitAccount;
-  readonly window: LimitPoolMember["window"];
+  readonly member: LimitPoolMember;
   readonly reset: LimitPoolWindow["resets"][number] | undefined;
   readonly now: number;
   readonly redeemAt: NonNullable<LimitAccount["redeem"]>;
   readonly closePopover: () => void;
 }) {
+  const { account } = member;
   const redeem = useResetCredit(redeemAt.environmentId, redeemAt.input);
   return (
     <>
       <PopoverPopup side="top" sideOffset={6}>
         <SegmentPopover
-          account={account}
-          window={window}
+          member={member}
           reset={reset}
           now={now}
           redeem={redeem}
@@ -472,8 +471,7 @@ function PoolBar({
           member.window ? (
             <PoolSegment
               key={member.account.key}
-              account={member.account}
-              window={member.window}
+              member={member}
               reset={restores.get(member.account.key)}
               color={color}
               now={now}

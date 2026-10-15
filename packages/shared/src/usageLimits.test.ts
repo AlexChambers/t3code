@@ -5,6 +5,7 @@ import {
   type ServerProvider,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -839,6 +840,119 @@ describe("pools", () => {
     // Session resets determine the account order for every row.
     expect(session?.members.map((member) => member.account.key)).toEqual(["hub:a", "hub:b"]);
     expect(pools[0]?.accounts.map((account) => account.key)).toEqual(["hub:a", "hub:b"]);
+  });
+});
+
+describe("pooled binding limits", () => {
+  const resetIn = (minutes: number) =>
+    DateTime.formatIso(DateTime.makeUnsafe(now + minutes * 60_000));
+  const weekly = {
+    ...window,
+    id: "seven_day",
+    kind: "weekly",
+    label: "Weekly",
+    windowDurationMins: 7 * 24 * 60,
+  } as const;
+  const account = (
+    key: string,
+    windows: LimitAccount["limits"]["windows"],
+    driver = "claudeAgent",
+  ): LimitAccount => ({
+    key,
+    driver: ProviderDriverKind.make(driver),
+    displayName: key,
+    email: undefined,
+    plan: undefined,
+    accentColor: undefined,
+    environments: [],
+    sourceLabel: "Hub",
+    redeem: null,
+    limits: { checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)), windows },
+  });
+  const sessionRow = (windows: LimitAccount["limits"]["windows"], driver?: string) =>
+    collectLimitPools([account("A", windows, driver)], now)[0]!.windows[0]!;
+
+  it("counts accounts with a spent weekly as empty until their weekly resets", () => {
+    // The pool from #19035: A and C have used up their weekly limit.
+    const accounts = (
+      [
+        ["A", 98, 0, 48, resetIn(66), resetIn(1016)],
+        ["B", 32, 50, 78, resetIn(166), resetIn(8000)],
+        ["C", 100, 0, 98, undefined, resetIn(7000)],
+      ] as const
+    ).map(([key, session, week, fable, sessionReset, weekReset]) =>
+      account(key, [
+        { ...window, usedPercent: 100 - session, resetsAt: sessionReset },
+        { ...weekly, usedPercent: 100 - week, resetsAt: weekReset },
+        { ...weekly, id: "seven_day_fable", usedPercent: 100 - fable, resetsAt: weekReset },
+      ]),
+    );
+    const rows = collectLimitPools(accounts, now)[0]!.windows;
+    const row = (id: string) => rows.find((candidate) => candidate.id === id)!;
+    expect(row("five_hour").remainingPercent).toBe(11);
+    expect(row("seven_day_fable").remainingPercent).toBe(26);
+    expect(row("seven_day").remainingPercent).toBe(17);
+    expect(
+      row("five_hour").members.map((m) => [m.effectiveRemainingPercent, m.holdingWindow?.id]),
+    ).toEqual([
+      [0, "seven_day"],
+      [32, undefined],
+      [0, "seven_day"],
+    ]);
+    // A's own session reset frees nothing; its weekly reset is what refills it.
+    expect(
+      row("five_hour").resets.map((r) => [r.member.account.key, r.at, r.restoresPercent]),
+    ).toEqual([
+      ["B", Date.parse(resetIn(166)), 23],
+      ["A", Date.parse(resetIn(1016)), 33],
+      ["C", Date.parse(resetIn(7000)), 33],
+    ]);
+  });
+
+  it.each([1, 46])(
+    "leaves a fresh session unheld while %i percent of the weekly is left",
+    (week) => {
+      const row = sessionRow([
+        { ...window, usedPercent: 0 },
+        { ...weekly, usedPercent: 100 - week, resetsAt: resetIn(24 * 60) },
+      ]);
+      expect(row.members[0]).toMatchObject({ effectiveRemainingPercent: 100, holdingWindow: null });
+    },
+  );
+
+  it("restores only the session quota left when the weekly resets first", () => {
+    const row = sessionRow([
+      { ...window, usedPercent: 20, resetsAt: resetIn(180) },
+      { ...weekly, usedPercent: 100, resetsAt: resetIn(60) },
+    ]);
+    expect(row.members[0]).toMatchObject({
+      effectiveRemainingPercent: 0,
+      remainingAfterResetPercent: 80,
+    });
+    expect(row.resets).toMatchObject([{ at: Date.parse(resetIn(60)), restoresPercent: 80 }]);
+  });
+
+  it("counts down to its own reset when a spent session outlasts its spent weekly", () => {
+    const row = sessionRow([
+      { ...window, usedPercent: 100, resetsAt: resetIn(240) },
+      { ...weekly, usedPercent: 100, resetsAt: resetIn(60) },
+    ]);
+    expect(row.members[0]!.holdingWindow).toBeNull();
+    expect(row.resets).toMatchObject([{ at: Date.parse(resetIn(240)), restoresPercent: 100 }]);
+  });
+
+  it.each([
+    ["codex", "primary", "secondary", true],
+    ["cursor", "five_hour", "seven_day", false],
+  ] as const)("%s %s held by a spent %s: %s", (driver, id, weeklyId, held) => {
+    const row = sessionRow(
+      [
+        { ...window, id, usedPercent: 2 },
+        { ...weekly, id: weeklyId, usedPercent: 100 },
+      ],
+      driver,
+    );
+    expect(row.members[0]!.holdingWindow?.id ?? null).toBe(held ? weeklyId : null);
   });
 });
 

@@ -81,7 +81,9 @@ the dialog.
 **Usage → Limits** pools every subscription account it can see per provider, so with several Codex
 or Claude accounts across your environments and hubs you read one number per window rather than a
 list. Each window card shows how much of the pool is left and a bar with one segment per account,
-kept in the same column across windows. Accounts are ordered by their 5-hour reset, soonest
+kept in the same column across windows. An account whose weekly limit is used up counts as empty
+in its session and per-model rows, with a lock and a countdown to its weekly reset. Accounts are
+ordered by their 5-hour reset, soonest
 first, or by the first available window when no account reports a 5-hour limit. A gap means the
 account does not report that window. When the provider reports reset times, the card also says
 when the next reset lands and how much it hands back. The hatched
