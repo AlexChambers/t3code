@@ -942,6 +942,34 @@ describe("pooled binding limits", () => {
   });
 
   it.each([
+    ["before it", 60, 70],
+    ["after it", 6000, 100],
+    ["at an unknown time", null, 0],
+  ] as const)(
+    "holds a model weekly by a spent all-models weekly that resets %s",
+    (_, weekMinutes, restored) => {
+      const weekReset = weekMinutes === null ? undefined : resetIn(weekMinutes);
+      const fable = collectLimitPools(
+        [
+          account("A", [
+            { ...weekly, usedPercent: 100, resetsAt: weekReset },
+            { ...weekly, id: "seven_day_fable", usedPercent: 30, resetsAt: resetIn(600) },
+          ]),
+        ],
+        now,
+      )[0]!.windows.find((row) => row.id === "seven_day_fable")!;
+      expect(fable.members[0]).toMatchObject({
+        effectiveRemainingPercent: 0,
+        holdingWindow: { id: "seven_day" },
+        remainingAfterResetPercent: restored,
+      });
+      expect(fable.resets).toMatchObject(
+        weekReset ? [{ at: Date.parse(weekReset), restoresPercent: restored }] : [],
+      );
+    },
+  );
+
+  it.each([
     ["codex", "primary", "secondary", true],
     ["cursor", "five_hour", "seven_day", false],
   ] as const)("%s %s held by a spent %s: %s", (driver, id, weeklyId, held) => {
