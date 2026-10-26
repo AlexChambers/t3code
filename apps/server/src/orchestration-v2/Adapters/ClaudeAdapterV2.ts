@@ -6914,7 +6914,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
 
         // A steer offered with priority "now" aborts a pending permission
         // callback, and Claude asks again as a new request. Left pending, the
-        // old card takes answers Claude no longer waits for (#15517).
+        // old card takes answers Claude no longer waits for.
         const cancelAbandonedRequest = Effect.fnUntraced(function* (artifacts: {
           readonly node: OrchestrationV2ExecutionNode;
           readonly request: OrchestrationV2RuntimeRequest;

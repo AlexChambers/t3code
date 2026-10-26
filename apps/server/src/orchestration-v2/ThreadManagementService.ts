@@ -527,7 +527,7 @@ function latestSteerableRun(
 }
 
 // Steering into a turn blocked on the user's answer can abort the question,
-// and the provider asks it again with the user's typed answers gone (#15517).
+// and the provider asks it again with the user's typed answers gone.
 function runAwaitsUser(
   projection: Pick<OrchestrationV2ThreadProjection, "providerTurns" | "runtimeRequests">,
   run: OrchestrationV2Run,

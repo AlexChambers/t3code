@@ -11,15 +11,12 @@ import {
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadProjection,
   ProjectId,
-  ProviderDriverKind,
   ProviderInstanceId,
-  ProviderSessionId,
   ProviderTurnId,
   RunId,
   RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";

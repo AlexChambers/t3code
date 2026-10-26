@@ -1470,10 +1470,11 @@ describe("ClaudeAdapterV2 abandoned questions", () => {
         );
         const canUseTool = openedOptions?.canUseTool;
         assert.isFunction(canUseTool);
-        const controller = new AbortController();
+        const abortScope = yield* Scope.make();
+        const signal = yield* Effect.abortSignal.pipe(Scope.provide(abortScope));
         const requestUpdates = yield* runtime.events.pipe(
           Stream.filter((event) => event.type === "runtime_request.updated"),
-          Stream.tap(() => Effect.sync(() => controller.abort())),
+          Stream.tap(() => Scope.close(abortScope, Exit.void)),
           Stream.take(2),
           Stream.runCollect,
           Effect.forkScoped,
@@ -1495,7 +1496,7 @@ describe("ClaudeAdapterV2 abandoned questions", () => {
               ],
             },
             {
-              signal: controller.signal,
+              signal,
               toolUseID: "tool-abandoned-question",
               requestId: "request-abandoned-question",
             },
